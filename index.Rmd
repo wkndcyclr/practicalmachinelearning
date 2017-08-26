@@ -2,29 +2,113 @@
 title: "Practical Machine Learning Course Project"
 author: "Evan Raichek"
 date: "August 25, 2017"
-output: html_document
+output: 
+  html_document: 
+    keep_md: yes
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r setup, include=FALSE, cache=TRUE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, message = FALSE, warning = FALSE)
+```
+```{r initialcode, include=FALSE}
+library(dplyr)
+library(caret)
+library(scales)
+setwd("~/coursera-datascience/MachineLearning/practicalmachinelearning")
+trainingbase <- read.csv("pml-training.csv", na.strings = c("NA", "#DIV/0!"), stringsAsFactors = FALSE)
+testingbase <-  read.csv("pml-testing.csv", na.strings = c("NA", "#DIV/0!"), stringsAsFactors = FALSE)
 ```
 
-## R Markdown
+### Introduction
+This project predicts how people exercise using a data collected from personal activity devices. 6 participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways and data from accelerometers on the belt, forearm, arm, and dumbell was captured.
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+### Data Preparation / Feature Selection
+The data consist of a training and test datasets with the dimensions 19622 and 20 observations respectively, each with 160 variables. Viewing the training dataset reveals many columns with significant number of NAs.  This is confirmed through a summary NAs in columns.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r removeNA, echo=FALSE}
+summary(colMeans(is.na(trainingbase)))
+keep <- colMeans(is.na(trainingbase)) < .97
+training <- trainingbase[, keep]
+testing <- testingbase[,keep]
 ```
 
-## Including Plots
+Based on this all columns with 97% or more NAs are removed, as they will provide limited value to the model.  Next an evaluation of correlation identifies 7 additional columns that can be removed
 
-You can also embed plots, for example:
+```{r findcorr, echo=FALSE}
+findCorrelation(cor(training[,8:59]), verbose = FALSE, names=TRUE)
+remove <- findCorrelation(cor(training[,8:59]), verbose = FALSE, names=TRUE)
+training <- training[,!names(training) %in% remove]
+testing <- testing[,!names(testing) %in% remove]
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+## remove metadata columns
+training <- training[, -c(1:7)]
+testing <- testing[, -c(1:7)]
+
+## split data
+set.seed(12345)
+inTrain <- createDataPartition(y=training$classe, p=0.7, list=FALSE)
+train <- training[inTrain, ]
+test <- training[-inTrain, ]
+```
+Finally, the first 7 columns, which contain metadata, are removed,  leaving 46 variables (45 predictors and 1 outcome variable) to use in the model.
+
+### Model Creation
+The model selected is Random Forest, with data split into 70% for training, and 30% for validation.  Tuning of the random forest is performed to choose the best performing model on the the test data.  The 3 version run are:  
+  
+- **rf**:  Random Forest with caret defaults, to see the what it recommends for "mtry" 
+- **rf2**: Random Forest with mtry set at 7    
+    * This is approximately the square root of the number of predictors  
+    * As seen later, the default Random Forest does not run an mtry close to 7  
+- **rf_gridsearch**: Random Forest with cross validation (10 folds), with mtry from 5 - 10  
+    * Use **cross validation** to see if how results differ from the default bootstrap  
+    * Bracket the mtry value of 7, to determine mtry with the best accuracy  
+
+### Model Execution and Comparison
+The 3 models are:
+
+```{r showmodels, eval=FALSE}
+rf <- train(classe ~., data=train, method="rf", prox=TRUE)
+
+mtry <- 7
+tunegrid <- expand.grid(.mtry=mtry)
+rf2 <- train(classe ~., data=train, method="rf", tuneGrid=tunegrid, prox=TRUE)
+
+control <- trainControl(method="cv", number=10,  search="grid")
+tunegrid <- expand.grid(.mtry=c(5:10))
+rf_gridsearch <- train(classe ~., data=train, method="rf", metric="Accuracy", tuneGrid=tunegrid, trControl=control)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r loadmodels, echo=FALSE}
+rf <- readRDS("rf.rds")
+rf2 <- readRDS("rf2.rds")
+rf_gridsearch <- readRDS("rfgridsearch.rds")
+```
+Summary of the models are below, with the following hightlights:
+
+- For **rf**  the accuracy never reaches 99%, and the mtry jumps from 2 to 23
+- For **rf2** and **rf_gridsearch** accuracy exceeds 99% with the highest accurcy being **rf_gridseach** with mtry = 7
+- The two bootstrap models each ran several hours, while *rf_gridsearch**, using cross validation, ran in 31 minutes
+- OOB error rates are between .8% and .9 % for all models
+
+```{r modelsummary, echo=FALSE}
+rf
+rf2
+rf_gridsearch
+```
+OOB;s for each model  
+
+- **rf**: `r percent(mean(rf$finalModel$err.rate[,"OOB"]))`  
+- **rf2**: `r percent(mean(rf2$finalModel$err.rate[,"OOB"]))`  
+- **rf_gridsearch**: `r percent(mean(rf_gridsearch$finalModel$err.rate[,"OOB"]))`  
+
+### Model Evaluation against Validation data
+The selected model **rf_gridsearch** with mtry =7 was run against the validation data, and yieled similar results, exceeding 99%.  
+The predictors used in this final model are the first 7 variable shown in variable importance.
+```{r predict, include=FALSE}
+prf_gridsearch <- predict(rf_gridsearch, test)
+```
+
+```{r modelvalidation, echo=FALSE}
+confusionMatrix(test$classe,prf_gridsearch)
+plot(varImp(rf_gridsearch))
+```
